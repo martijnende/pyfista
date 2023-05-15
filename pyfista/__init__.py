@@ -116,18 +116,11 @@ class FISTA:
         w = jsp.linalg.eigh(A @ A, eigvals_only=True)
         # Construct the full size convolution kernel
         A = convolution_matrix(kernel, n=self.N, mode="same")
-        # self.kernel = jnp.array(A)
-        # self.kernel = jnp.array(kernel)
+        self.kernel = jnp.array(A)
         # Define parameters (scaled by largest eigenvalue)
         L = 2 * w.max()
         self.rho = 1 / L
         self.lam2 = self.lam / L
-
-        self.dn = lax.conv_dimension_numbers(
-            lhs_shape=(self.batch, self.N, 1), rhs_shape=(len(kernel), 1, 1),
-            dimension_numbers=("NWC", "WIO", "NWC")
-        )
-        self.kernel = jnp.array(kernel[:, None, None])
 
         pass
     
@@ -136,21 +129,13 @@ class FISTA:
         
         # Initialise FISTA variables
         key = jax.random.PRNGKey(int(time()))
-        y_jax = y[:, :, None]
-        # y_jax = y.copy()
-        x = jax.random.normal(key, shape=y_jax.shape) / y_jax.shape[1]
+        x = jax.random.normal(key, shape=y.shape) / y.shape[1]
         r = x.copy()
         t = jnp.ones(r.shape[0])
 
         kernel = self.kernel
         rho = self.rho
         lam = self.lam2
-
-        conv = partial(
-            lax.conv_general_dilated, 
-            window_strides=(1,), padding="SAME",
-            dimension_numbers=self.dn
-        )
         
         @jax.jit
         def soft(x, threshold):
@@ -160,26 +145,22 @@ class FISTA:
         @jax.jit
         def fista_step(t, x, r, y):
             """Perform one FISTA step (for a single channel)"""
-            # y_hat = kernel @ x
-            y_hat = conv(x, kernel)
+            y_hat = kernel @ x
             loss = jnp.linalg.norm(y - y_hat)
-            d = conv(r, kernel) - y
-            x_new = soft(r - rho * conv(d, kernel), lam)
-            # x_new = soft(r - rho * kernel.T @ (kernel @ r - y), lam)
+            x_new = soft(r - rho * kernel.T @ (kernel @ r - y), lam)
             t_new = 0.5 * (1 + jnp.sqrt(1 + 4 * t**2))
-            t_ratio = ((t - 1) / t_new)[:, None, None]
-            # t_ratio = ((t - 1) / t_new)
+            t_ratio = ((t - 1) / t_new)
             r_new = x_new + t_ratio * (x_new - x)
             return t_new, x_new, r_new, loss
         
         # Parallelise fista_step
-        # do_step = jax.vmap(fista_step, in_axes=0, out_axes=0)
+        do_step = jax.vmap(fista_step, in_axes=0, out_axes=0)
 
         # Main computation loop
         @progress_bar_scan(N)
         def body_fn(carry, i):
             t, x, r = carry
-            t_new, x_new, r_new, loss = fista_step(t, x, r, y_jax)
+            t_new, x_new, r_new, loss = do_step(t, x, r, y)
             return (t_new, x_new, r_new), loss.mean()
 
         carry = (t, x, r)
@@ -187,10 +168,7 @@ class FISTA:
         # Final impulse model
         x = carry[1]
         # Reconstruction
-        # y_hat = np.array(x @ kernel)
-        # conv = jax.vmap(partial(jnp.convolve, mode="same"), in_axes=(0, None), out_axes=0)
-        # y_hat = np.array(conv(x, kernel))
-        y_hat = np.squeeze(conv(x, kernel))
+        y_hat = np.array(x @ kernel)
         x = np.array(x)
 
         del r
