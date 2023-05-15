@@ -8,8 +8,9 @@ import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 from jax import lax
-from jax.experimental import host_callback
+from jax.experimental import host_callback, sparse
 
+from functools import partial
 from time import time
 
 from tqdm.notebook import tqdm
@@ -96,23 +97,38 @@ def progress_bar_scan(num_samples, message=None):
 class FISTA:
     
     
-    def __init__(self, kernel, lam, N):
+    def __init__(self, kernel, lam, N, batch_size=32):
         
+        self.lam = lam
+        self.N = N
+        self.batch = batch_size
+        self.update_kernel(kernel)
+
+        print(f"Step size: {self.rho:.3e}")
+        print(f"Sparsity constant: {self.lam:.3e}")
+        
+        pass
+
+    def update_kernel(self, kernel):
         # Construct the minimal convolution kernel
         A = convolution_matrix(kernel, n=len(kernel), mode="same")
         # Get the eigenvalues
         w = jsp.linalg.eigh(A @ A, eigvals_only=True)
         # Construct the full size convolution kernel
-        A = convolution_matrix(kernel, n=N, mode="same")
-        self.kernel = jnp.array(A)
+        A = convolution_matrix(kernel, n=self.N, mode="same")
+        # self.kernel = jnp.array(A)
+        # self.kernel = jnp.array(kernel)
         # Define parameters (scaled by largest eigenvalue)
         L = 2 * w.max()
         self.rho = 1 / L
-        self.lam = lam / L
+        self.lam2 = self.lam / L
 
-        print(f"Step size: {self.rho:.3e}")
-        print(f"Sparsity constant: {self.lam:.3e}")
-        
+        self.dn = lax.conv_dimension_numbers(
+            lhs_shape=(self.batch, self.N, 1), rhs_shape=(len(kernel), 1, 1),
+            dimension_numbers=("NWC", "WIO", "NWC")
+        )
+        self.kernel = jnp.array(kernel[:, None, None])
+
         pass
     
     
@@ -120,13 +136,21 @@ class FISTA:
         
         # Initialise FISTA variables
         key = jax.random.PRNGKey(int(time()))
-        x = jax.random.normal(key, shape=y.shape) / y.shape[1]
+        y_jax = y[:, :, None]
+        # y_jax = y.copy()
+        x = jax.random.normal(key, shape=y_jax.shape) / y_jax.shape[1]
         r = x.copy()
         t = jnp.ones(r.shape[0])
 
         kernel = self.kernel
         rho = self.rho
-        lam = self.lam
+        lam = self.lam2
+
+        conv = partial(
+            lax.conv_general_dilated, 
+            window_strides=(1,), padding="SAME",
+            dimension_numbers=self.dn
+        )
         
         @jax.jit
         def soft(x, threshold):
@@ -136,21 +160,26 @@ class FISTA:
         @jax.jit
         def fista_step(t, x, r, y):
             """Perform one FISTA step (for a single channel)"""
-            y_hat = kernel @ x
+            # y_hat = kernel @ x
+            y_hat = conv(x, kernel)
             loss = jnp.linalg.norm(y - y_hat)
-            x_new = soft(r - rho * kernel.T @ (kernel @ r - y), lam)
+            d = conv(r, kernel) - y
+            x_new = soft(r - rho * conv(d, kernel), lam)
+            # x_new = soft(r - rho * kernel.T @ (kernel @ r - y), lam)
             t_new = 0.5 * (1 + jnp.sqrt(1 + 4 * t**2))
-            r_new = x_new + ((t - 1) / t_new) * (x_new - x)
+            t_ratio = ((t - 1) / t_new)[:, None, None]
+            # t_ratio = ((t - 1) / t_new)
+            r_new = x_new + t_ratio * (x_new - x)
             return t_new, x_new, r_new, loss
         
         # Parallelise fista_step
-        do_step = jax.vmap(fista_step, in_axes=0, out_axes=0)
+        # do_step = jax.vmap(fista_step, in_axes=0, out_axes=0)
 
         # Main computation loop
         @progress_bar_scan(N)
         def body_fn(carry, i):
             t, x, r = carry
-            t_new, x_new, r_new, loss = do_step(t, x, r, y)
+            t_new, x_new, r_new, loss = fista_step(t, x, r, y_jax)
             return (t_new, x_new, r_new), loss.mean()
 
         carry = (t, x, r)
@@ -158,7 +187,10 @@ class FISTA:
         # Final impulse model
         x = carry[1]
         # Reconstruction
-        y_hat = np.array(x @ kernel)
+        # y_hat = np.array(x @ kernel)
+        # conv = jax.vmap(partial(jnp.convolve, mode="same"), in_axes=(0, None), out_axes=0)
+        # y_hat = np.array(conv(x, kernel))
+        y_hat = np.squeeze(conv(x, kernel))
         x = np.array(x)
 
         del r
