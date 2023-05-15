@@ -3,7 +3,6 @@ __version__ = "1.0"
 
 import numpy as np
 from scipy.linalg import convolution_matrix
-from scipy import sparse
 
 import jax
 import jax.numpy as jnp
