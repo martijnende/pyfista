@@ -2,6 +2,7 @@ __author__ = "Martijn van den Ende"
 __version__ = "1.0"
 
 import numpy as np
+import scipy.signal as sp
 from scipy.linalg import convolution_matrix
 
 import jax
@@ -16,7 +17,7 @@ from tqdm.notebook import tqdm
 
 # tqdm progress bar snippet from Jeremie Coullon:
 # https://www.jeremiecoullon.com/2021/01/29/jax_progress_bar/
-def progress_bar_scan(num_samples, message=None):
+def progress_bar_scan(num_samples, message=None, verbose=False):    
     "Progress bar for a JAX scan"
     if message is None:
             message = f"Running for {num_samples:,} iterations"
@@ -79,6 +80,9 @@ def progress_bar_scan(num_samples, message=None):
         This means that `iter_num` is the current iteration number
         """
 
+        if not verbose:
+            return func
+
         def wrapper_progress_bar(carry, x):
             if type(x) is tuple:
                 iter_num, *_ = x
@@ -97,7 +101,6 @@ class FISTA:
     
     
     def __init__(self, lam, N, kernel=None, verbose=False):
-        
         self.lam = lam
         self.N = N
         self.verbose = verbose
@@ -161,7 +164,7 @@ class FISTA:
         do_step = jax.vmap(fista_step, in_axes=0, out_axes=0)
 
         # Main computation loop
-        @progress_bar_scan(N)
+        @progress_bar_scan(N, verbose=self.verbose)
         def body_fn(carry, i):
             t, x, r = carry
             t_new, x_new, r_new, loss = do_step(t, x, r, y)
@@ -181,3 +184,27 @@ class FISTA:
         
         return loss, x, y_hat
 
+
+def get_kernel_bandwidth(data, widths=None):
+    """A helper routine to find the optimal wavelet bandwidth
+
+    Parameters
+    ----------
+    data: np.array
+        Input data of shape (Nch, Nt)
+    widths: np.array
+        Vector of wavelet width parameters to scan over
+
+    Returns
+    -------
+    a_opt: float
+        The optimal wavelet width parameter
+    """
+    if widths is None:
+        widths = np.power(10, np.linspace(-2, 1, 20))
+    cwt_result = np.abs(sp.cwt(data[0], sp.ricker, widths))
+    for wv in data[1:]:
+        cwt_result += np.abs(sp.cwt(wv, sp.ricker, widths))
+    ind = np.unravel_index(np.argmax(cwt_result), shape=cwt_result.shape)
+    a_opt = widths[ind[0]]
+    return a_opt
