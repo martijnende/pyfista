@@ -3,14 +3,14 @@ __version__ = "1.0"
 
 import numpy as np
 from scipy.linalg import convolution_matrix
+from scipy import sparse
 
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 from jax import lax
-from jax.experimental import host_callback, sparse
+from jax.experimental import host_callback
 
-from functools import partial
 from time import time
 
 from tqdm.notebook import tqdm
@@ -97,15 +97,13 @@ def progress_bar_scan(num_samples, message=None):
 class FISTA:
     
     
-    def __init__(self, kernel, lam, N, batch_size=32):
+    def __init__(self, lam, N, kernel=None, verbose=False):
         
         self.lam = lam
         self.N = N
-        self.batch = batch_size
-        self.update_kernel(kernel)
-
-        print(f"Step size: {self.rho:.3e}")
-        print(f"Sparsity constant: {self.lam:.3e}")
+        self.verbose = verbose
+        if kernel is not None:
+            self.update_kernel(kernel)
         
         pass
 
@@ -118,14 +116,21 @@ class FISTA:
         A = convolution_matrix(kernel, n=self.N, mode="same")
         self.kernel = jnp.array(A)
         # Define parameters (scaled by largest eigenvalue)
-        L = 2 * w.max()
-        self.rho = 1 / L
-        self.lam2 = self.lam / L
+        self.L = 2 * w.max()
+        self.rho = 1 / self.L
+        self.lam2 = self.lam / self.L
+
+        if self.verbose:
+            print(f"Step size: {self.rho:.3e}")
+            print(f"Sparsity constant: {self.lam:.3e}")
+            print(f"Scaled sparsity constant: {self.lam2:.3e}")
 
         pass
     
     
     def solve(self, y, N):
+
+        assert self.kernel is not None, "Kernel not initialised"
         
         # Initialise FISTA variables
         key = jax.random.PRNGKey(int(time()))
@@ -173,6 +178,7 @@ class FISTA:
 
         del r
         del t
+        del carry
         
         return loss, x, y_hat
 
